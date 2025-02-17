@@ -1,75 +1,124 @@
 import streamlit as st
-import subprocess
+from moviepy.editor import *
+import tempfile
 import os
-from pathlib import Path
 
-def process_ffmpeg_command(image_files, primary_audio, bg_music):
-    output_file = "output_reel.mp4"
+def create_reel(images, voiceover, background_music):
+    # Create temporary directory to store processed files
+    temp_dir = tempfile.mkdtemp()
     
-    # Construct FFmpeg command
-    ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-i", primary_audio,
-        "-i", bg_music,
-    ]
+    # Load the voiceover audio to get its duration
+    voice_clip = AudioFileClip(voiceover)
+    total_duration = voice_clip.duration
     
-    for img in image_files:
-        ffmpeg_cmd.extend(["-loop", "1", "-t", "3", "-i", img])
+    # Calculate duration for each image
+    image_duration = total_duration / 6
     
-    filter_complex = """
-        [0:a][1:a]amix=inputs=2:duration=first:weights=1.5 0.5[a];
-    """
+    # Create image clips
+    image_clips = []
+    for img in images:
+        # Read the image
+        clip = ImageClip(img)
+        # Resize to Instagram reel size (1080x1920)
+        clip = clip.resize(width=1080, height=1920)
+        # Set the duration for this image
+        clip = clip.set_duration(image_duration)
+        image_clips.append(clip)
     
-    for i in range(len(image_files)):
-        filter_complex += (
-            f"[{i+2}:v]scale=1080:1920:force_original_aspect_ratio=decrease," 
-            f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2[s{i}];"
-        )
+    # Concatenate all image clips
+    final_clip = concatenate_videoclips(image_clips, method="compose")
     
-    filter_complex += "".join([f"[s{i}]" for i in range(len(image_files))]) + "concat=n=6:v=1:a=0[v]"
+    # Load and adjust background music
+    bg_music = AudioFileClip(background_music)
+    # Loop the background music if it's shorter than the video
+    if bg_music.duration < total_duration:
+        bg_music = vfx.loop(bg_music, duration=total_duration)
+    # Trim if longer than video
+    bg_music = bg_music.subclip(0, total_duration)
+    # Lower the volume of background music
+    bg_music = bg_music.volumex(0.3)
     
-    ffmpeg_cmd.extend([
-        "-filter_complex", filter_complex,
-        "-map", "[v]", "-map", "[a]",
-        "-c:v", "libx264", "-c:a", "aac", "-shortest", output_file
-    ])
+    # Combine voiceover and background music
+    final_audio = CompositeAudioClip([voice_clip, bg_music])
     
-    # Run FFmpeg
-    subprocess.run(ffmpeg_cmd, check=True)
-    return output_file
+    # Set the final audio to the video
+    final_clip = final_clip.set_audio(final_audio)
+    
+    # Export path
+    output_path = os.path.join(temp_dir, "instagram_reel.mp4")
+    
+    # Write the final video
+    final_clip.write_videofile(
+        output_path,
+        fps=30,
+        codec='libx264',
+        audio_codec='aac',
+        temp_audiofile=os.path.join(temp_dir, 'temp-audio.m4a'),
+        remove_temp=True
+    )
+    
+    return output_path
 
-st.title("FFmpeg Video Generator")
+def main():
+    st.title("Instagram Reel Generator")
+    
+    st.header("Upload Images")
+    uploaded_images = []
+    for i in range(6):
+        image = st.file_uploader(f"Upload Image {i+1}", type=['jpg', 'jpeg', 'png'], key=f"image_{i}")
+        if image:
+            uploaded_images.append(image)
+    
+    st.header("Upload Audio")
+    voiceover = st.file_uploader("Upload Voiceover", type=['mp3', 'wav', 'm4a'], key="voiceover")
+    background_music = st.file_uploader("Upload Background Music", type=['mp3', 'wav', 'm4a'], key="background_music")
+    
+    # Using a single button with conditional logic
+    if st.button("Generate Reel", key="generate_button"):
+        if len(uploaded_images) == 6 and voiceover and background_music:
+            try:
+                with st.spinner("Generating your reel..."):
+                    # Save uploaded files temporarily
+                    temp_dir = tempfile.mkdtemp()
+                    
+                    # Save images
+                    image_paths = []
+                    for i, img in enumerate(uploaded_images):
+                        img_path = os.path.join(temp_dir, f"image_{i}.png")
+                        with open(img_path, "wb") as f:
+                            f.write(img.getbuffer())
+                        image_paths.append(img_path)
+                    
+                    # Save audio files
+                    voiceover_path = os.path.join(temp_dir, "voiceover.mp3")
+                    with open(voiceover_path, "wb") as f:
+                        f.write(voiceover.getbuffer())
+                    
+                    bg_music_path = os.path.join(temp_dir, "background.mp3")
+                    with open(bg_music_path, "wb") as f:
+                        f.write(background_music.getbuffer())
+                    
+                    # Generate reel
+                    output_path = create_reel(image_paths, voiceover_path, bg_music_path)
+                    
+                    # Provide download button
+                    with open(output_path, "rb") as f:
+                        st.download_button(
+                            label="Download Reel",
+                            data=f,
+                            file_name="instagram_reel.mp4",
+                            mime="video/mp4",
+                            key="download_button"
+                        )
+                    
+                    # Cleanup
+                    import shutil
+                    shutil.rmtree(temp_dir)
+                    
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+        else:
+            st.warning("Please upload all required files (6 images, voiceover, and background music)")
 
-# File Uploaders
-uploaded_images = [st.file_uploader(f"Upload Image {i+1}", type=["png", "jpg", "jpeg"]) for i in range(6)]
-primary_audio = st.file_uploader("Upload Primary Song", type=["mp3", "wav"])
-bg_music = st.file_uploader("Upload Background Music", type=["mp3", "wav"])
-
-if st.button("Generate Video"):
-    if None in uploaded_images or not primary_audio or not bg_music:
-        st.error("Please upload all required files.")
-    else:
-        # Save files temporarily
-        temp_dir = Path("temp")
-        temp_dir.mkdir(exist_ok=True)
-        
-        image_paths = []
-        for idx, img in enumerate(uploaded_images):
-            img_path = temp_dir / f"image_{idx+1}.png"
-            with open(img_path, "wb") as f:
-                f.write(img.read())
-            image_paths.append(str(img_path))
-        
-        primary_audio_path = temp_dir / "primary_audio.mp3"
-        with open(primary_audio_path, "wb") as f:
-            f.write(primary_audio.read())
-        
-        bg_music_path = temp_dir / "bg_music.mp3"
-        with open(bg_music_path, "wb") as f:
-            f.write(bg_music.read())
-        
-        # Process video
-        output_path = process_ffmpeg_command(image_paths, str(primary_audio_path), str(bg_music_path))
-        
-        st.success("Video Generated Successfully!")
-        st.video(output_path)
+if __name__ == "__main__":
+    main()
